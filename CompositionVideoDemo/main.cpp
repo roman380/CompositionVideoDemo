@@ -1,117 +1,88 @@
 ﻿#include "pch.h"
 
-#include <DispatcherQueue.h>
-
 #include "MainWindow.h"
 
-namespace winrt
+struct DispatcherQueueController
 {
-    using namespace Windows::Foundation;
-    using namespace Windows::Foundation::Numerics;
-    using namespace Windows::UI;
-    using namespace Windows::UI::Composition;
-    using namespace Windows::Media::Core;
-    using namespace Windows::Media::Playback;
-    using namespace Windows::Storage;
-    using namespace Windows::Storage::Streams;
-}
+	DispatcherQueueController()
+	{
+		DispatcherQueueOptions ControllerOptions { sizeof ControllerOptions, DQTYPE_THREAD_CURRENT, DQTAT_COM_NONE };
+		THROW_IF_FAILED(CreateDispatcherQueueController(ControllerOptions, reinterpret_cast<PDISPATCHERQUEUECONTROLLER*>(winrt::put_abi(Controller))));
+		WI_ASSERT(Controller);
+	}
+	~DispatcherQueueController()
+	{
+		WI_ASSERT(!Controller);
+	}
 
-    namespace impl
-    {
-        inline winrt::fire_and_forget ShutdownAndThenPostQuitMessage(winrt::Windows::System::DispatcherQueueController const& controller, int exitCode)
-        {
-            auto queue = controller.DispatcherQueue();
-            co_await controller.ShutdownQueueAsync();
-            co_await queue;
-            PostQuitMessage(exitCode);
-            co_return;
-        }
-    }
+	winrt::fire_and_forget Shutdown()
+	{
+		WI_ASSERT(Controller);
+		auto Queue = Controller.DispatcherQueue();
+		co_await Controller.ShutdownQueueAsync();
+		co_await Queue;
+		Controller = winrt::Windows::System::DispatcherQueueController { nullptr };
+		co_return;
+	}
 
-    inline auto CreateDispatcherQueueControllerForCurrentThread()
-    {
-        namespace abi = winrt::Windows::System;
+	winrt::Windows::System::DispatcherQueueController Controller { nullptr };
+};
 
-        DispatcherQueueOptions options
-        {
-            sizeof(DispatcherQueueOptions),
-            DQTYPE_THREAD_CURRENT,
-            DQTAT_COM_NONE
-        };
-
-        winrt::Windows::System::DispatcherQueueController controller{ nullptr };
-        winrt::check_hresult(CreateDispatcherQueueController(options, reinterpret_cast<ABI::Windows::System::IDispatcherQueueController**>(winrt::put_abi(controller))));
-        return controller;
-    }
-
-    inline int ShutdownDispatcherQueueControllerAndWait(winrt::Windows::System::DispatcherQueueController const& controller, int exitCode)
-    {
-        impl::ShutdownAndThenPostQuitMessage(controller, exitCode);
-        MSG msg = {};
-        while (GetMessageW(&msg, nullptr, 0, 0))
-        {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-        return static_cast<int>(msg.wParam);
-    }
-
-int __stdcall WinMain(HINSTANCE, HINSTANCE, PSTR, int)
+int WINAPI wWinMain([[maybe_unused]] HINSTANCE Instance, [[maybe_unused]] HINSTANCE PreviousInstance, [[maybe_unused]] LPWSTR CommandLine, [[maybe_unused]] int ShowCommand)
 {
-    // Parse our command line args
-    int argc = 0;
-    auto argv = winrt::check_pointer(CommandLineToArgvW(GetCommandLineW(), &argc));
-    std::vector<std::wstring> args(argv + 1, argv + argc);
-    if (args.empty())
-    {
-        MessageBoxW(
-            nullptr,
-            L"Expected video path command line argument!",
-            L"CompositionVideoDemo",
-            MB_ICONERROR);
-        return 1;
-    }
-    auto videoPath = args[0];
+	try
+	{
+		int argc = 0;
+		auto argv = winrt::check_pointer(CommandLineToArgvW(GetCommandLineW(), &argc));
+		std::vector<std::wstring> args(argv + 1, argv + argc);
+		THROW_HR_IF_MSG(E_INVALIDARG, args.empty(), "Expected command line argument was not found");
 
-    // Initialize COM
-    winrt::init_apartment(winrt::apartment_type::single_threaded);
+		winrt::init_apartment(winrt::apartment_type::single_threaded);
 
-    // Create the DispatcherQueue that the compositor needs to run
-    auto controller = CreateDispatcherQueueControllerForCurrentThread();
+		auto Path = args[0];
+		winrt::Windows::Storage::Streams::IRandomAccessStream Stream { nullptr };
+		THROW_IF_FAILED(CreateRandomAccessStreamOnFile(Path.c_str(), static_cast<DWORD>(winrt::Windows::Storage::FileAccessMode::Read), winrt::guid_of<decltype(Stream)>(), winrt::put_abi(Stream)));
 
-    // Create our window and visual tree
-    auto window = MainWindow(L"CompositionVideoDemo", 800, 600);
-    auto compositor = winrt::Compositor();
-    auto target = window.CreateWindowTarget(compositor);
-    auto root = compositor.CreateSpriteVisual();
-    root.RelativeSizeAdjustment({ 1.0f, 1.0f });
-    root.Brush(compositor.CreateColorBrush(winrt::Colors::Black()));
-    target.Root(root);
+		DispatcherQueueController DispatcherQueueController;
 
-    // Setup our MediaPlayer
-    auto player = winrt::MediaPlayer();
-    auto surface = player.GetSurface(compositor);
-    auto contentVisual = compositor.CreateSpriteVisual();
-    contentVisual.RelativeSizeAdjustment({ 1.0f, 1.0f });
-    contentVisual.Brush(compositor.CreateSurfaceBrush(surface.CompositionSurface()));
-    root.Children().InsertAtTop(contentVisual);
+		MainWindow Window(L"CompositionVideoDemo", std::make_pair(800, 600));
+		auto Compositor = winrt::Windows::UI::Composition::Compositor();
+		auto WindowTarget = Window.CreateWindowTarget(Compositor);
+		auto RootVisual = Compositor.CreateSpriteVisual();
+		RootVisual.RelativeSizeAdjustment({ 1.0f, 1.0f });
+		RootVisual.Brush(Compositor.CreateColorBrush(winrt::Windows::UI::Colors::Black()));
+		WindowTarget.Root(RootVisual);
 
-    // Open our video as a IRandomAccessStream
-    winrt::IRandomAccessStream stream{ nullptr };
-    winrt::check_hresult(CreateRandomAccessStreamOnFile(videoPath.c_str(), static_cast<DWORD>(winrt::FileAccessMode::Read), winrt::guid_of<decltype(stream)>(), winrt::put_abi(stream)));
+		auto MediaPlayer = winrt::Windows::Media::Playback::MediaPlayer();
+		auto MediaPlayerSurface = MediaPlayer.GetSurface(Compositor);
+		auto ContentVisual = Compositor.CreateSpriteVisual();
+		ContentVisual.RelativeSizeAdjustment({ 1.0f, 1.0f });
+		ContentVisual.Brush(Compositor.CreateSurfaceBrush(MediaPlayerSurface.CompositionSurface()));
+		RootVisual.Children().InsertAtTop(ContentVisual);
 
-    // Hookup the video to our MediaPlayer
-    auto source = winrt::MediaSource::CreateFromStream(stream, L"");
-    auto mediaItem = winrt::MediaPlaybackItem(source);
-    player.Source(mediaItem);
-    player.Play();
+		auto MediaSource = winrt::Windows::Media::Core::MediaSource::CreateFromStream(Stream, L"");
+		auto MediaPlaybackItem = winrt::Windows::Media::Playback::MediaPlaybackItem(MediaSource);
+		MediaPlayer.Source(MediaPlaybackItem);
+		MediaPlayer.Play();
 
-    // Message pump
-    MSG msg = {};
-    while (GetMessageW(&msg, nullptr, 0, 0))
-    {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
-    }
-    return ShutdownDispatcherQueueControllerAndWait(controller, static_cast<int>(msg.wParam));
+		for(;;)
+		{
+			MSG Message;
+			if(!GetMessageW(&Message, WM_NULL, 0u, 0u))
+				break;
+			TranslateMessage(&Message);
+			DispatchMessageW(&Message);
+		}
+		DispatcherQueueController.Shutdown();
+
+		// WARN: We cannot co_await/get the call above here in the STA, so just ignore the disgraceful termination (we would need to poll for completion otherwise)
+		DispatcherQueueController.Controller = winrt::Windows::System::DispatcherQueueController { nullptr };
+
+		return 1;
+	}
+	catch(...)
+	{
+		LOG_CAUGHT_EXCEPTION();
+		return wil::ResultFromCaughtException();
+	}
 }

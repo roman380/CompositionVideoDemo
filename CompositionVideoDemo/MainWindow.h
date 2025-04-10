@@ -2,67 +2,38 @@
 
 #include <shlobj.h>
 
-#include <windows.ui.composition.interop.h>
+#include <Windows.UI.Composition.Interop.h>
 
-#include <winrt\windows.ui.composition.h>
-#include <winrt\windows.ui.composition.desktop.h>
+#include <winrt\Windows.UI.Composition.h>
+#include <winrt\Windows.UI.Composition.Desktop.h>
 
-template <typename T>
-struct DesktopWindow
+struct MainWindow
 {
-	using base_type = DesktopWindow<T>;
-	HWND m_window = nullptr;
-
-	static T* GetThisFromHandle(HWND const window) noexcept
+	MainWindow(std::wstring const& Text, std::pair<LONG, LONG> Size)
 	{
-		return reinterpret_cast<T*>(GetWindowLongPtr(window, GWLP_USERDATA));
+		static wchar_t const* const g_ClassName = L"CompositionVideoDemo.MainWindow";
+		std::once_flag g_RegisterClassOnce;
+		std::call_once(g_RegisterClassOnce, []() {
+			WNDCLASSEXW WindowClass { sizeof WindowClass };
+			WindowClass.lpfnWndProc = WndProc;
+			WindowClass.hInstance = nullptr;
+			WindowClass.hIcon = LoadIconW(WindowClass.hInstance, IDI_APPLICATION);
+			WindowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+			WindowClass.lpszClassName = g_ClassName;
+			WindowClass.hIconSm = LoadIconW(WindowClass.hInstance, IDI_APPLICATION);
+			winrt::check_bool(RegisterClassExW(&WindowClass));
+		});
+		RECT Position { 0, 0, Size.first, Size.second };
+		DWORD Style = WS_OVERLAPPEDWINDOW;
+		DWORD ExStyle = WS_EX_NOREDIRECTIONBITMAP;
+		winrt::check_bool(AdjustWindowRectEx(&Position, Style, false, ExStyle));
+		winrt::check_bool(CreateWindowExW(ExStyle, g_ClassName, Text.c_str(), Style, CW_USEDEFAULT, CW_USEDEFAULT, Position.right - Position.left, Position.bottom - Position.top, nullptr, nullptr, nullptr, this));
+		WI_ASSERT(m_Handle);
+		ShowWindow(m_Handle, SW_SHOW);
+		UpdateWindow(m_Handle);
 	}
 
-	static LRESULT __stdcall WndProc(HWND const window, UINT const message, WPARAM const wparam, LPARAM const lparam) noexcept
-	{
-		WINRT_ASSERT(window);
-
-		if(WM_NCCREATE == message)
-		{
-			auto cs = reinterpret_cast<CREATESTRUCT*>(lparam);
-			T* that = static_cast<T*>(cs->lpCreateParams);
-			WINRT_ASSERT(that);
-			WINRT_ASSERT(!that->m_window);
-			that->m_window = window;
-			SetWindowLongPtr(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(that));
-		} else if(T* that = GetThisFromHandle(window))
-		{
-			return that->MessageHandler(message, wparam, lparam);
-		}
-
-		return DefWindowProc(window, message, wparam, lparam);
-	}
-
-	LRESULT MessageHandler(UINT const message, WPARAM const wparam, LPARAM const lparam) noexcept
-	{
-		switch(message)
-		{
-		case WM_DESTROY:
-			PostQuitMessage(0);
-			return 0;
-		case WM_DPICHANGED:
-			{
-				auto rect = reinterpret_cast<const RECT*>(lparam);
-				SetWindowPos(m_window,
-							 nullptr,
-							 rect->left,
-							 rect->top,
-							 rect->right - rect->left,
-							 rect->bottom - rect->top,
-							 SWP_NOZORDER | SWP_NOACTIVATE);
-			}
-			return 0;
-		default:
-			return DefWindowProcW(m_window, message, wparam, lparam);
-		}
-	}
-
-	inline auto CreateDesktopWindowTarget(winrt::Windows::UI::Composition::Compositor const& compositor, HWND window, bool isTopMost)
+	auto CreateDesktopWindowTarget(winrt::Windows::UI::Composition::Compositor const& compositor, HWND window, bool isTopMost)
 	{
 		namespace abi = ABI::Windows::UI::Composition::Desktop;
 
@@ -72,24 +43,51 @@ struct DesktopWindow
 		return target;
 	}
 
-	winrt::Windows::UI::Composition::Desktop::DesktopWindowTarget CreateWindowTarget(winrt::Windows::UI::Composition::Compositor const& compositor)
+	winrt::Windows::UI::Composition::Desktop::DesktopWindowTarget CreateWindowTarget(winrt::Windows::UI::Composition::Compositor const& Compositor)
 	{
-		return CreateDesktopWindowTarget(compositor, m_window, true);
+		return CreateDesktopWindowTarget(Compositor, m_Handle, true);
 	}
-
-	void InitializeObjectWithWindowHandle(winrt::Windows::Foundation::IUnknown const& object)
-	{
-		auto initializer = object.as<IInitializeWithWindow>();
-		winrt::check_hresult(initializer->Initialize(m_window));
-	}
-};
-
-struct MainWindow : DesktopWindow<MainWindow>
-{
-	static const std::wstring ClassName;
-	MainWindow(std::wstring const& titleString, int width, int height);
-	LRESULT MessageHandler(UINT const message, WPARAM const wparam, LPARAM const lparam);
 
 private:
-	static void RegisterWindowClass();
+	static MainWindow* FromHandle(HWND const Handle)
+	{
+		return reinterpret_cast<MainWindow*>(GetWindowLongPtrW(Handle, GWLP_USERDATA));
+	}
+	LRESULT HandleMessage(UINT Message, WPARAM wParam, LPARAM lParam)
+	{
+		switch(Message)
+		{
+		case WM_DESTROY:
+			PostQuitMessage(0);
+			return 0;
+		case WM_DPICHANGED:
+			{
+				auto const& Position = *reinterpret_cast<RECT const*>(lParam);
+				SetWindowPos(m_Handle, nullptr, Position.left, Position.top, Position.right - Position.left, Position.bottom - Position.top, SWP_NOZORDER | SWP_NOACTIVATE);
+			}
+			return 0;
+		default:
+			return DefWindowProcW(m_Handle, Message, wParam, lParam);
+		}
+	}
+	static LRESULT CALLBACK WndProc(HWND Window, UINT Message, WPARAM wParam, LPARAM lParam)
+	{
+		WI_ASSERT(Window);
+		if(Message == WM_NCCREATE)
+		{
+			auto const CreateStruct = reinterpret_cast<CREATESTRUCT*>(lParam);
+			auto const That = static_cast<MainWindow*>(CreateStruct->lpCreateParams);
+			WI_ASSERT(That);
+			WI_ASSERT(!That->m_Handle);
+			That->m_Handle = Window;
+			SetWindowLongPtrW(Window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(That));
+			return DefWindowProcW(Window, Message, wParam, lParam);
+		}
+		auto const That = FromHandle(Window);
+		if(That)
+			return That->HandleMessage(Message, wParam, lParam);
+		return DefWindowProcW(Window, Message, wParam, lParam);
+	}
+
+	HWND m_Handle = nullptr;
 };
