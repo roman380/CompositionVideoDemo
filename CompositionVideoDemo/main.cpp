@@ -1,4 +1,7 @@
 ﻿#include "pch.h"
+
+#include <DispatcherQueue.h>
+
 #include "MainWindow.h"
 
 namespace winrt
@@ -13,10 +16,45 @@ namespace winrt
     using namespace Windows::Storage::Streams;
 }
 
-namespace util
-{
-    using namespace robmikh::common::desktop;
-}
+    namespace impl
+    {
+        inline winrt::fire_and_forget ShutdownAndThenPostQuitMessage(winrt::Windows::System::DispatcherQueueController const& controller, int exitCode)
+        {
+            auto queue = controller.DispatcherQueue();
+            co_await controller.ShutdownQueueAsync();
+            co_await queue;
+            PostQuitMessage(exitCode);
+            co_return;
+        }
+    }
+
+    inline auto CreateDispatcherQueueControllerForCurrentThread()
+    {
+        namespace abi = winrt::Windows::System;
+
+        DispatcherQueueOptions options
+        {
+            sizeof(DispatcherQueueOptions),
+            DQTYPE_THREAD_CURRENT,
+            DQTAT_COM_NONE
+        };
+
+        winrt::Windows::System::DispatcherQueueController controller{ nullptr };
+        winrt::check_hresult(CreateDispatcherQueueController(options, reinterpret_cast<ABI::Windows::System::IDispatcherQueueController**>(winrt::put_abi(controller))));
+        return controller;
+    }
+
+    inline int ShutdownDispatcherQueueControllerAndWait(winrt::Windows::System::DispatcherQueueController const& controller, int exitCode)
+    {
+        impl::ShutdownAndThenPostQuitMessage(controller, exitCode);
+        MSG msg = {};
+        while (GetMessageW(&msg, nullptr, 0, 0))
+        {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        return static_cast<int>(msg.wParam);
+    }
 
 int __stdcall WinMain(HINSTANCE, HINSTANCE, PSTR, int)
 {
@@ -39,7 +77,7 @@ int __stdcall WinMain(HINSTANCE, HINSTANCE, PSTR, int)
     winrt::init_apartment(winrt::apartment_type::single_threaded);
 
     // Create the DispatcherQueue that the compositor needs to run
-    auto controller = util::CreateDispatcherQueueControllerForCurrentThread();
+    auto controller = CreateDispatcherQueueControllerForCurrentThread();
 
     // Create our window and visual tree
     auto window = MainWindow(L"CompositionVideoDemo", 800, 600);
@@ -75,5 +113,5 @@ int __stdcall WinMain(HINSTANCE, HINSTANCE, PSTR, int)
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
-    return util::ShutdownDispatcherQueueControllerAndWait(controller, static_cast<int>(msg.wParam));
+    return ShutdownDispatcherQueueControllerAndWait(controller, static_cast<int>(msg.wParam));
 }
